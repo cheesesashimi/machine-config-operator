@@ -940,30 +940,13 @@ func (b *buildReconciler) deleteMOSBImage(ctx context.Context, mosb *mcfgv1.Mach
 	}
 
 	image := string(mosb.Spec.RenderedImagePushSpec)
-	isOpenShiftRegistry, err := b.isOpenShiftRegistry(image)
-	if err != nil {
-		return err
-	}
-	if isOpenShiftRegistry {
-		klog.Infof("Deleting image %s from internal registry for MachineOSBuild %s", image, mosb.Name)
-		// Use the openshift API to delete the image
-		ns, img, err := extractNSAndNameWithTag(image)
-		if err != nil {
-			return err
-		}
-		if err := b.imageclient.ImageV1().ImageStreamTags(ns).Delete(context.TODO(), img, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("could not delete image %s from internal registry for MachineOSBuild %s: %w", image, mosb.Name, err)
-		}
-		return nil
-	}
 
-	klog.Infof("Deleting image %s from external registry using skopeo for MachineOSBuild %s", image, mosb.Name)
 	if err := b.deleteImage(ctx, image, mosb); err != nil {
 		wrappedErr := fmt.Errorf("could not delete image for MachineOSBuild %s for MachineOSConfig %s: %w", mosb.Name, moscName, err)
 		// If the image cannot be deleted because it either does not exist or one's
 		// creds do not have the necessary permissions, then we should ignore the
 		// error and continue.
-		if imagepruner.IsTolerableDeleteErr(err) {
+		if imagepruner.IsTolerableDeleteErr(err) || k8serrors.IsNotFound(err) {
 			klog.Warning(wrappedErr.Error())
 		} else {
 			return wrappedErr
@@ -1541,6 +1524,25 @@ func (b *buildReconciler) inspectImage(ctx context.Context, pullspec string, mos
 
 // deleteImage retrieves the necessary objects and calls DeleteImage on the imagepruner.
 func (b *buildReconciler) deleteImage(ctx context.Context, pullspec string, mosb *mcfgv1.MachineOSBuild) error {
+	isOpenShiftRegistry, err := b.isOpenShiftRegistry(pullspec)
+	if err != nil {
+		return err
+	}
+
+	if isOpenShiftRegistry {
+		klog.Infof("Deleting image %s from internal registry for MachineOSBuild %s", pullspec, mosb.Name)
+		// Use the openshift API to delete the image
+		ns, img, err := extractNSAndNameWithTag(pullspec)
+		if err != nil {
+			return err
+		}
+		if err := b.imageclient.ImageV1().ImageStreamTags(ns).Delete(context.TODO(), img, metav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("could not delete image %s from internal registry for MachineOSBuild %s: %w", pullspec, mosb.Name, err)
+		}
+		return nil
+	}
+
+	klog.Infof("Deleting image %s from external registry using skopeo for MachineOSBuild %s", image, mosb.Name)
 	secret, cc, err := b.getObjectsForImagePruner(mosb)
 	if err != nil {
 		return err
