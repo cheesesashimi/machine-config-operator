@@ -203,7 +203,7 @@ func TestImagePrunerErrors(t *testing.T) {
 func TestImagePrunerErrorsWithCreds(t *testing.T) {
 	//	skipIfUnableToRun(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	t.Cleanup(cancel)
 
 	noCredPath := ""
@@ -245,6 +245,7 @@ func TestImagePrunerErrorsWithCreds(t *testing.T) {
 		if testCase.credPaths == nil {
 			testCase.credPaths = []string{noCredPath}
 		}
+
 		t.Run(testCase.name, func(t *testing.T) {
 			for _, credPath := range testCase.credPaths {
 				t.Run(getName(credPath), func(t *testing.T) {

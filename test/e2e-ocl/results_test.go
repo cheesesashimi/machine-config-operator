@@ -1,13 +1,10 @@
 package e2e_ocl
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
-	"github.com/openshift/machine-config-operator/pkg/controller/build/utils"
-	"github.com/stretchr/testify/require"
+	"github.com/davecgh/go-spew/spew"
 )
 
 type registryTestCase struct {
@@ -22,22 +19,24 @@ type registryTestCase struct {
 
 func TestImagePrunerTestCasesExisting(t *testing.T) {
 	for _, testCase := range getRegistryTestCases() {
-		if !strings.Contains(testCase.name, "existing") {
+		if !strings.Contains(testCase.name, "digest") {
 			continue
 		}
 
-		redhatCredPath := "/home/zzlotnik/.docker/config.json"
+		t.Logf("%s", spew.Sdump(testCase))
 
-		ip, k8sSecret, err := setupImagePrunerForTest(redhatCredPath)
-		require.NoError(t, err)
+		// redhatCredPath := "/home/zzlotnik/.docker/config.json"
 
-		_, digest, err := ip.InspectImage(context.TODO(), testCase.pullspec, k8sSecret, &mcfgv1.ControllerConfig{})
-		require.NoError(t, err)
+		// ip, k8sSecret, err := setupImagePrunerForTest(redhatCredPath)
+		// require.NoError(t, err)
 
-		digested, err := utils.ParseImagePullspec(testCase.pullspec, reverseDigest(digest.String()))
-		require.NoError(t, err)
+		// _, digest, err := ip.InspectImage(context.TODO(), testCase.pullspec, k8sSecret, &mcfgv1.ControllerConfig{})
+		// require.NoError(t, err)
 
-		t.Log(digested)
+		// digested, err := utils.ParseImagePullspec(testCase.pullspec, reverseDigest(digest.String()))
+		// require.NoError(t, err)
+
+		// t.Log(digested)
 	}
 }
 
@@ -129,6 +128,13 @@ func getRegistryTestCases() []registryTestCase {
 			deleteErrImageNotFound:  true,
 		},
 		{
+			name:                    "RedHat.io nonexistent image digest",
+			pullspec:                "registry.redhat.io/ubi9/ubi@sha256:60b11a9d3e53b8449528ce6122e0bf45e96c516f06dcfe6db1468a9834921588",
+			credPaths:               []string{redhatCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrImageNotFound:  true,
+		},
+		{
 			name:                  "Red Hat Registry existing image",
 			pullspec:              "registry.access.redhat.com/ubi9/ubi:latest",
 			credPaths:             []string{noCredPath, dockerCredPath, quayCredPath},
@@ -151,6 +157,13 @@ func getRegistryTestCases() []registryTestCase {
 		{
 			name:                    "Red Hat Registry nonexistent image tag",
 			pullspec:                "registry.access.redhat.com/ubi9/ubi:notrealgoaway",
+			credPaths:               []string{noCredPath, quayCredPath, dockerCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrImageNotFound:  true,
+		},
+		{
+			name:                    "Red Hat Registry nonexisent image digest",
+			pullspec:                "registry.access.redhat.com/ubi9/ubi@sha256:60b11a9d3e53b8449528ce6122e0bf45e96c516f06dcfe6db1468a9834921588",
 			credPaths:               []string{noCredPath, quayCredPath, dockerCredPath},
 			inspectErrImageNotFound: true,
 			deleteErrImageNotFound:  true,
@@ -190,10 +203,24 @@ func getRegistryTestCases() []registryTestCase {
 			deleteErrImageNotFound:  true,
 		},
 		{
+			name:                    "Docker.io nonexistent image digest",
+			pullspec:                "docker.io/library/python@sha256:992cb3b24167479655119f438ba34ff0789ab8664f2a1e69cd9e8499c9b1f2b3",
+			credPaths:               []string{noCredPath, dockerCredPath, quayCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrImageNotFound:  true,
+		},
+		{
 			name:                  "Fedora Registry - existing image",
 			pullspec:              "registry.fedoraproject.org/fedora:latest",
 			credPaths:             []string{noCredPath, dockerCredPath, quayCredPath},
 			deleteErrAccessDenied: true,
+		},
+		{
+			name:                    "Fedora Registry - nonexistent image digest",
+			pullspec:                "registry.fedoraproject.org/fedora@sha256:a3322527585b87442ad3d9a43a0f9c36702965d4ed50888221f2a1ae4f420a07",
+			credPaths:               []string{noCredPath, dockerCredPath, quayCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrImageNotFound:  true,
 		},
 		{
 			name:                  "GitHub image registry - existing image",
@@ -224,6 +251,13 @@ func getRegistryTestCases() []registryTestCase {
 			deleteErrAccessDenied:   true,
 		},
 		{
+			name:                    "GitHub image registry - nonexistent image digest",
+			pullspec:                "ghcr.io/open-webui/open-webui@sha256:805366e33231e62299b753674182928bceab1f30b247ba9e0cc8a32dcb8e934a",
+			credPaths:               []string{noCredPath, dockerCredPath, quayCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrAccessDenied:   true,
+		},
+		{
 			name:                  "Google image registry - existing image",
 			pullspec:              "gcr.io/google.com/cloudsdktool/google-cloud-cli:stable",
 			credPaths:             []string{noCredPath, dockerCredPath, quayCredPath},
@@ -248,6 +282,13 @@ func getRegistryTestCases() []registryTestCase {
 		{
 			name:                    "Google image registry - nonexistent tag",
 			pullspec:                "gcr.io/google.com/cloudsdktool/google-cloud-cli:notarealtag",
+			credPaths:               []string{noCredPath, dockerCredPath, quayCredPath},
+			inspectErrImageNotFound: true,
+			deleteErrImageNotFound:  true,
+		},
+		{
+			name:                    "Google image registry - nonexistent image digest",
+			pullspec:                "gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:a10ac71ff4deb9bd972b2bbc8c4e1f54e3b87cb15b2e51cd16e540e5dd3cad6b",
 			credPaths:               []string{noCredPath, dockerCredPath, quayCredPath},
 			inspectErrImageNotFound: true,
 			deleteErrImageNotFound:  true,

@@ -328,6 +328,7 @@ func (br buildRequestImpl) renderContainerfile() (string, error) {
 		UserContainerfile  string
 		BaseOSImage        string
 		ExtensionsImage    string
+		MCOImage           string
 		ExtensionsPackages []string
 		KernelType         string
 		KernelPackages     map[string][]string
@@ -337,6 +338,7 @@ func (br buildRequestImpl) renderContainerfile() (string, error) {
 		UserContainerfile:  br.userContainerfile,
 		BaseOSImage:        br.opts.OSImageURLConfig.BaseOSContainerImage,
 		ExtensionsImage:    br.opts.OSImageURLConfig.BaseOSExtensionsContainerImage,
+		MCOImage:           br.opts.Images.MachineConfigOperator,
 		ExtensionsPackages: extPkgs,
 		KernelType:         kernelType,
 		KernelPackages:     kernelPackages,

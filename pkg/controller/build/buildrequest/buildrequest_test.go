@@ -129,6 +129,17 @@ func TestBuildRequest(t *testing.T) {
 				return opts
 			},
 		},
+		{
+			name: "Kernel installation",
+			optsFunc: func() BuildRequestOpts {
+				opts := getBuildRequestOpts()
+				opts.MachineConfig.Spec.KernelType = ctrlcommon.KernelTypeRealtime
+				return opts
+			},
+			expectedContainerfileContents: []string{
+				"rpm -q kernel-rt-core",
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -160,6 +171,8 @@ func TestBuildRequest(t *testing.T) {
 			for _, content := range testCase.unexpectedContainerfileContents {
 				assert.NotContains(t, containerfile, content)
 			}
+
+			t.Logf("%s", containerfile)
 
 			buildJob := br.Builder().GetObject().(*batchv1.Job)
 

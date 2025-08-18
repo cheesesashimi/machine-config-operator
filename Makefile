@@ -2,7 +2,7 @@ E2E_ROOT_DIR = ./test
 E2E_SUITES = $(notdir $(wildcard $(E2E_ROOT_DIR)/e2e*))
 
 MCO_COMPONENTS = daemon controller server operator
-EXTRA_COMPONENTS = apiserver-watcher machine-os-builder machine-config-tests-ext
+EXTRA_COMPONENTS = apiserver-watcher machine-os-builder machine-config-tests-ext machine-os-build-context
 TEST_COMPONENTS = machine-config-tests-ext
 ALL_COMPONENTS = $(patsubst %,machine-config-%,$(MCO_COMPONENTS)) $(EXTRA_COMPONENTS) $(TEST_COMPONENTS)
 ALL_COMPONENTS_PATHS = $(patsubst %,cmd/%,$(ALL_COMPONENTS))

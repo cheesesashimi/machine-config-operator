@@ -1542,7 +1542,7 @@ func (b *buildReconciler) deleteImage(ctx context.Context, pullspec string, mosb
 		return nil
 	}
 
-	klog.Infof("Deleting image %s from external registry using skopeo for MachineOSBuild %s", image, mosb.Name)
+	klog.Infof("Deleting image %s from external registry using skopeo for MachineOSBuild %s", pullspec, mosb.Name)
 	secret, cc, err := b.getObjectsForImagePruner(mosb)
 	if err != nil {
 		return err
