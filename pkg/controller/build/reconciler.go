@@ -1447,11 +1447,11 @@ func (b *buildReconciler) reuseImageForNewMOSB(ctx context.Context, mosc *mcfgv1
 	// image is found, we will reuse this image
 	case inspect != nil && err == nil:
 		klog.Infof("Existing MachineOSBuild %q found, reusing image %q by assigning to MachineOSConfig %q", newMosb.Name, image, mosc.Name)
-		// we are unauthorized and need to report this
-	case k8serrors.IsUnauthorized(err):
+	// we are unauthorized and need to report this
+	case k8serrors.IsUnauthorized(err) || imagepruner.IsAccessDeniedErr(err):
 		return fmt.Errorf("authentication failed while inspecting image %q for MachineOSBuild %q: %w", image, newMosb.Name, err)
-		// image does not exist, so we delete MOSB and rebuild
-	case k8serrors.IsNotFound(err):
+	// image does not exist, so we delete MOSB and rebuild
+	case k8serrors.IsNotFound(err) || imagepruner.IsImageNotFoundErr(err):
 		klog.Infof("Deleting MachineOSBuild %q and rebuilding", newMosb.Name)
 		if deleteErr := b.mcfgclient.MachineconfigurationV1().MachineOSBuilds().Delete(ctx, newMosb.Name, metav1.DeleteOptions{}); deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
 			return fmt.Errorf("could not delete MachineOSBuild %q: %w", newMosb.Name, deleteErr)
