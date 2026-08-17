@@ -27,6 +27,9 @@ spec:
         - "--tls-cipher-suites={{join .TLSCipherSuites ","}}"
         - "--tls-min-version={{.TLSMinVersion}}"
         - "--streams-cache=/var/cache/mcc"
+        # PoC: bootc-operator integration. Enabled to delegate OS image rollout
+        # to the bootc-operator via BootcNode/BootcNodePool objects.
+        - "--enable-bootc-node-management=true"
         resources:
           requests:
             cpu: 20m

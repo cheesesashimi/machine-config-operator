@@ -12,6 +12,15 @@ rules:
 - apiGroups: ["machineconfiguration.openshift.io"]
   resources: ["controllerconfigs/finalizers", "kubeletconfigs/finalizers", "containerruntimeconfigs/finalizers", "machineconfigpools/finalizers", "internalreleaseimages/finalizers", "machineosconfigs/finalizers", "machineosbuilds/finalizers"]
   verbs: ["update"]
+# PoC: bootc-operator integration. The node controller manages a paused
+# BootcNodePool per MachineConfigPool and approves per-node reboots by patching
+# BootcNode spec.desiredImageState.
+- apiGroups: ["node.bootc.dev"]
+  resources: ["bootcnodepools", "bootcnodepools/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["node.bootc.dev"]
+  resources: ["bootcnodes", "bootcnodes/status"]
+  verbs: ["get", "list", "watch", "update", "patch"]
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "watch", "create", "update", "delete"]

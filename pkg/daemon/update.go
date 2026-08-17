@@ -3284,10 +3284,25 @@ func (dn *CoreOSDaemon) applyLayeredOSChanges(mcDiff machineConfigDiff, oldConfi
 		defer os.Remove(extensionsRepo)
 	}
 
+	// When the OS image rebase is delegated to the bootc-operator, we must NOT
+	// touch pending/staged deployments here. The bootc-operator daemon stages
+	// the new image as a pending deployment (via `bootc switch`) and then
+	// reboots into it; running `rpm-ostree cleanup -p` would delete that staged
+	// deployment out from under bootc, silently reverting the OS rollout.
+	//
+	// This gating is intentionally scoped to the OS-update case: when the MCD is
+	// delegating the OS to bootc, it does not own pending deployments at all.
+	delegatingOSToBootc := mcDiff.osUpdate && dn.bootcNodeManagement
+
 	// Always clean up pending, because the RT kernel switch logic below operates on booted,
-	// not pending.
-	if err := removePendingDeployment(); err != nil {
-		return fmt.Errorf("failed to remove pending deployment: %w", err)
+	// not pending. Skipped when the OS rollout is delegated to the bootc-operator
+	// so we don't discard bootc's staged deployment.
+	if delegatingOSToBootc {
+		klog.Infof("bootc node management enabled: skipping 'rpm-ostree cleanup -p' to preserve bootc-staged deployment")
+	} else {
+		if err := removePendingDeployment(); err != nil {
+			return fmt.Errorf("failed to remove pending deployment: %w", err)
+		}
 	}
 
 	defer func() {
@@ -3295,7 +3310,11 @@ func (dn *CoreOSDaemon) applyLayeredOSChanges(mcDiff machineConfigDiff, oldConfi
 		// as staged deployment. It gets applied only when we reboot the system.
 		// In case of an error during any rpm-ostree transaction, removing pending deployment
 		// should be sufficient to discard any applied changes.
-		if retErr != nil {
+		//
+		// Do not remove the pending deployment when delegating the OS rollout to
+		// the bootc-operator: the staged deployment belongs to bootc, and clearing
+		// it here would revert the in-progress rollout.
+		if retErr != nil && !delegatingOSToBootc {
 			// Print out the error now so that if we fail to cleanup -p, we don't lose it.
 			klog.Infof("Rolling back applied changes to OS due to error: %v", retErr)
 			if err := removePendingDeployment(); err != nil {
@@ -3318,7 +3337,26 @@ func (dn *CoreOSDaemon) applyLayeredOSChanges(mcDiff machineConfigDiff, oldConfi
 	}
 
 	// Update OS
-	if mcDiff.osUpdate {
+	//
+	// When bootc node management is enabled, the OS image is fetched and staged
+	// by the bootc-operator daemon *before* the node controller selects this node
+	// for update (candidacy is gated on the BootcNode reporting the target image
+	// as staged). The staged image becomes the pending ostree deployment, so the
+	// MCD must NOT perform its own rpm-ostree/bootc rebase here: the image is
+	// already staged and will be finalized by the reboot the MCD performs at the
+	// end of this update, exactly as for any other reboot-requiring change.
+	//
+	// This branch is only reached from the steady-state update() flow (via
+	// applyOSChanges); the firstboot/bootstrap pivots call updateLayeredOS
+	// directly and are intentionally unaffected, because the bootc-operator is
+	// not running that early.
+	switch {
+	case mcDiff.osUpdate && dn.bootcNodeManagement:
+		klog.Infof("bootc node management enabled: OS image %s already staged by bootc-operator; MCD will finalize via reboot", newConfig.Spec.OSImageURL)
+		if dn.nodeWriter != nil {
+			dn.nodeWriter.Eventf(corev1.EventTypeNormal, "OSUpgradeDelegated", "OS upgrade delegated to bootc-operator; new MachineConfig (%s) has new OS image (%s) staged for reboot", newConfig.Name, newConfig.Spec.OSImageURL)
+		}
+	case mcDiff.osUpdate:
 		if err := dn.updateLayeredOS(newConfig); err != nil {
 			mcdPivotErr.Inc()
 			return err
@@ -3326,7 +3364,7 @@ func (dn *CoreOSDaemon) applyLayeredOSChanges(mcDiff machineConfigDiff, oldConfi
 		if dn.nodeWriter != nil {
 			dn.nodeWriter.Eventf(corev1.EventTypeNormal, "OSUpgradeApplied", "OS upgrade applied; new MachineConfig (%s) has new OS image (%s)", newConfig.Name, newConfig.Spec.OSImageURL)
 		}
-	} else { //nolint:gocritic // The nil check for dn.nodeWriter has nothing to do with an OS update being unavailable.
+	default: //nolint:gocritic // The nil check for dn.nodeWriter has nothing to do with an OS update being unavailable.
 		// An OS upgrade is not available
 		if dn.nodeWriter != nil {
 			dn.nodeWriter.Eventf(corev1.EventTypeNormal, "OSUpgradeSkipped", "OS upgrade skipped; new MachineConfig (%s) has same OS image (%s) as old MachineConfig (%s)", newConfig.Name, newConfig.Spec.OSImageURL, oldConfig.Name)

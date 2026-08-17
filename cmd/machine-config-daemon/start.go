@@ -45,6 +45,7 @@ var (
 		promMetricsURL             string
 		tlsCipherSuites            []string
 		tlsMinVersion              string
+		bootcNodeManagement        bool
 	}
 )
 
@@ -61,6 +62,7 @@ func init() {
 	startCmd.PersistentFlags().StringVar(&startOpts.promMetricsURL, "metrics-url", "127.0.0.1:8797", "URL for prometheus metrics listener")
 	startCmd.PersistentFlags().StringSliceVar(&startOpts.tlsCipherSuites, "tls-cipher-suites", nil, "Comma-separated list of cipher suites for the metrics server")
 	startCmd.PersistentFlags().StringVar(&startOpts.tlsMinVersion, "tls-min-version", "VersionTLS12", "Minimum TLS version supported for the metrics server")
+	startCmd.PersistentFlags().BoolVar(&startOpts.bootcNodeManagement, "enable-bootc-node-management", ctrlcommon.BootcNodeManagementEnabledFromEnv(), "PoC: delegate OS image rebase to the bootc-operator (steady-state only; firstboot/bootstrap pivots are unaffected)")
 }
 
 //nolint:gocritic
@@ -113,7 +115,8 @@ func runStartCmd(_ *cobra.Command, _ []string) {
 	}
 
 	// If we are asked to run once and it's a valid file system path use
-	// the bare Daemon
+	// the bare Daemon. This is a bootstrap-like path where the bootc-operator is
+	// not available, so we deliberately do not enable bootc node management here.
 	if startOpts.onceFrom != "" {
 		err = dn.RunOnceFrom(startOpts.onceFrom, startOpts.skipReboot)
 		if err != nil {
@@ -121,6 +124,10 @@ func runStartCmd(_ *cobra.Command, _ []string) {
 		}
 		return
 	}
+
+	// Steady-state (cluster-connected) daemon: enable delegation of the OS image
+	// rebase to the bootc-operator when requested.
+	dn.SetBootcNodeManagement(startOpts.bootcNodeManagement)
 
 	// Use kubelet kubeconfig file to get the URL to kube-api-server
 	kubeconfig, err := clientcmd.LoadFromFile("/etc/kubernetes/kubeconfig")

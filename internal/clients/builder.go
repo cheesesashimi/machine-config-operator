@@ -3,6 +3,7 @@ package clients
 import (
 	"os"
 
+	bootcclientset "github.com/bootc-dev/bootc-operator/pkg/generated/clientset/versioned"
 	buildclientset "github.com/openshift/client-go/build/clientset/versioned"
 	configclientset "github.com/openshift/client-go/config/clientset/versioned"
 	imageclientset "github.com/openshift/client-go/image/clientset/versioned"
@@ -82,6 +83,13 @@ func (cb *Builder) MachineClientOrDie(name string) mapiclientset.Interface {
 // AROClientOrDie returns the ARO client interface for ARO-specific objects.
 func (cb *Builder) AROClientOrDie(name string) aroclientset.Interface {
 	return aroclientset.NewForConfigOrDie(rest.AddUserAgent(cb.config, name))
+}
+
+// BootcClientOrDie returns the client interface for the bootc-operator
+// node.bootc.dev API group (BootcNode/BootcNodePool). Used by the node
+// controller when bootc node management is enabled.
+func (cb *Builder) BootcClientOrDie(name string) bootcclientset.Interface {
+	return bootcclientset.NewForConfigOrDie(rest.AddUserAgent(cb.config, name))
 }
 
 // GetBuilderConfig returns a copy of the builders *rest.Config

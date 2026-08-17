@@ -25,6 +25,11 @@ rules:
 - apiGroups: ["operator.openshift.io"]
   resources: ["machineconfigurations"]
   verbs: ["get", "list", "watch"]
+# PoC: bootc-operator integration. The daemon reads BootcNode status for
+# observability only; the node controller owns writes.
+- apiGroups: ["node.bootc.dev"]
+  resources: ["bootcnodes"]
+  verbs: ["get", "list", "watch"]
 - apiGroups:
   - authentication.k8s.io
   resources:

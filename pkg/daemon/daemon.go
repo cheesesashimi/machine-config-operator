@@ -118,6 +118,15 @@ type Daemon struct {
 
 	fgHandler ctrlcommon.FeatureGatesHandler
 
+	// bootcNodeManagement, when true, delegates the OS image rebase to the
+	// bootc-operator: in the steady-state (non-firstboot) update path the MCD
+	// skips rpm-ostree/bootc rebasing and instead relies on its normal drain
+	// handshake, after which the node controller flips the node's BootcNode
+	// spec.desiredImageState to Booted. The firstboot/bootstrap pivot paths are
+	// deliberately unaffected because the bootc-operator is not running then.
+	// PoC gating; productization should use an openshift/api FeatureGate.
+	bootcNodeManagement bool
+
 	// channel used by callbacks to signal Run() of an error
 	exitCh chan<- error
 
@@ -357,6 +366,18 @@ func New(
 		cmdRunner:              cmdRunner,
 		podmanInterface:        podmanInterface,
 	}, nil
+}
+
+// SetBootcNodeManagement enables or disables delegation of the OS image rebase
+// to the bootc-operator. When enabled, the steady-state update path skips the
+// rpm-ostree/bootc rebase; firstboot/bootstrap pivots are unaffected. This is a
+// PoC gating mechanism set from the --enable-bootc-node-management flag (or the
+// MCO_BOOTC_NODE_MANAGEMENT env var).
+func (dn *Daemon) SetBootcNodeManagement(enabled bool) {
+	dn.bootcNodeManagement = enabled
+	if enabled {
+		klog.Infof("bootc node management enabled: OS image rebase delegated to bootc-operator (steady-state only)")
+	}
 }
 
 // ClusterConnect sets up the systemd and kubernetes connections needed to update the

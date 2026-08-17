@@ -1,0 +1,27 @@
+# Example of the BootcNodePool the MCO node controller creates for the "worker"
+# MachineConfigPool when bootc node management is enabled.
+#
+# NOTE: This object is normally created and reconciled automatically by the MCO
+# node controller (one per MachineConfigPool). It is shown here for reference and
+# debugging. The pool is always kept paused: the MCO drives rollout pacing and
+# draining itself, and approves each node's reboot by patching the node's
+# BootcNode spec.desiredImageState to "Booted" once the MCD drain handshake
+# completes. If the bootc-operator drove the rollout, the two daemons could fight.
+apiVersion: node.bootc.dev/v1alpha1
+kind: BootcNodePool
+metadata:
+  name: worker
+  labels:
+    machineconfiguration.openshift.io/machine-config-pool: worker
+    app.kubernetes.io/managed-by: machine-config-operator
+spec:
+  # Mirrors the MachineConfigPool's node selector.
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  # Resolved from the pool's rendered MachineConfig OSImageURL.
+  image:
+    ref: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:REPLACE_WITH_DIGEST
+  rollout:
+    # Always paused under MCO-driven rollout.
+    paused: true

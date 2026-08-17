@@ -33,6 +33,8 @@ import (
 	"github.com/openshift/machine-config-operator/pkg/constants"
 	buildconstants "github.com/openshift/machine-config-operator/pkg/controller/build/constants"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
+	bootcclientset "github.com/bootc-dev/bootc-operator/pkg/generated/clientset/versioned"
+	"github.com/openshift/machine-config-operator/pkg/controller/node/bootc"
 	daemonconsts "github.com/openshift/machine-config-operator/pkg/daemon/constants"
 	"github.com/openshift/machine-config-operator/pkg/osimagestream"
 	corev1 "k8s.io/api/core/v1"
@@ -75,6 +77,12 @@ const (
 	// defaultUpdateDelay is a pause to deal with churn in MachineConfigs; see
 	// https://github.com/openshift/machine-config-operator/issues/301
 	defaultUpdateDelay = 5 * time.Second
+
+	// bootcStagingRequeueDelay is how long to wait before re-checking a pool
+	// whose candidate nodes are waiting for the bootc-operator to stage the
+	// target OS image. Staging involves pulling image layers and can take a
+	// while; this interval balances responsiveness against churn.
+	bootcStagingRequeueDelay = 30 * time.Second
 
 	// osLabel is used to identify which type of OS the node has
 	osLabel = "kubernetes.io/os"
@@ -133,6 +141,26 @@ type Controller struct {
 
 	// osStreamsFgEnabled caches whether the OSStreams feature gate is enabled
 	osStreamsFgEnabled bool
+
+	// bootcReconciler, when non-nil, enables bootc node management: the OS
+	// image rollout is delegated to the bootc-operator via BootcNodePool /
+	// BootcNode objects. It is set via EnableBootcNodeManagement when the
+	// --enable-bootc-node-management flag (or env) is set on the controller.
+	bootcReconciler *bootc.Reconciler
+}
+
+// EnableBootcNodeManagement turns on delegation of OS image rollout to the
+// bootc-operator. It must be called before Run. When enabled, the controller
+// maintains a paused BootcNodePool per MachineConfigPool and approves per-node
+// reboots by patching BootcNode spec after the drain handshake completes.
+func (ctrl *Controller) EnableBootcNodeManagement(client bootcclientset.Interface) {
+	ctrl.bootcReconciler = bootc.NewReconciler(client)
+	klog.Infof("bootc node management enabled: OS image rollout delegated to bootc-operator")
+}
+
+// bootcEnabled reports whether bootc node management is active.
+func (ctrl *Controller) bootcEnabled() bool {
+	return ctrl.bootcReconciler != nil
 }
 
 func New(
@@ -1371,6 +1399,18 @@ func (ctrl *Controller) syncMachineConfigPool(key string) error {
 		}
 	}
 
+	// When bootc node management is enabled, ensure a paused BootcNodePool
+	// exists for each MachineConfigPool mirroring its selector and target OS
+	// image. This must happen before the rollout so the bootc-operator is aware
+	// of the target image (and can stage it) while the MCO drives pacing.
+	if ctrl.bootcEnabled() {
+		for _, p := range poolsToUpdate {
+			if err := ctrl.reconcileBootcNodePool(cc, p); err != nil {
+				return fmt.Errorf("reconciling BootcNodePool for pool %q: %w", p.Name, err)
+			}
+		}
+	}
+
 	if err := ctrl.updatePools(poolsToUpdate, controlPlaneTopology); err != nil {
 		return err
 	}
@@ -1435,6 +1475,7 @@ func (ctrl *Controller) updatePools(pools []*mcfgv1.MachineConfigPool, controlPl
 			}
 			return err
 		}
+
 		maxunavail, err := maxUnavailable(pool, nodes)
 		if err != nil {
 			if syncErr := ctrl.syncStatusOnly(pool); syncErr != nil {
@@ -1512,6 +1553,27 @@ func (ctrl *Controller) updatePools(pools []*mcfgv1.MachineConfigPool, controlPl
 		}
 
 		candidates, capacity := getAllCandidateMachines(layered, mosc, mosb, pool, nodes, maxunavail)
+
+		// When bootc node management is enabled, only allow a node to begin its
+		// update once the bootc-operator has staged the pool's target OS image on
+		// it. Staging happens with the node still online (no drain, no reboot);
+		// gating candidacy on it means that by the time the MCD drains the node
+		// and applies its config, finalizing the OS image is just the reboot the
+		// MCD already performs. This keeps the reboot owned by the MCD and removes
+		// the race with a bootc-driven reboot.
+		//
+		// If any candidates are held back waiting on staging, requeue the pool so
+		// we re-evaluate once the bootc-operator finishes staging: staging
+		// completion is reported on the BootcNode status and does not otherwise
+		// trigger a pool sync, so without this the pool could stall.
+		if ctrl.bootcEnabled() {
+			var heldBack int
+			candidates, heldBack = ctrl.filterBootcStagedCandidates(pool, candidates)
+			if heldBack > 0 {
+				klog.Infof("Pool %s: %d node(s) waiting on bootc image staging; requeuing", pool.Name, heldBack)
+				ctrl.enqueueAfter(pool, bootcStagingRequeueDelay)
+			}
+		}
 
 		// Track master unavailable count for arbiter coordination
 		if pool.Name == ctrlcommon.MachineConfigPoolMaster && controlPlaneTopology == configv1.HighlyAvailableArbiterMode {
@@ -1610,6 +1672,68 @@ func (ctrl *Controller) setClusterConfigAnnotation(nodes []*corev1.Node, control
 		}
 	}
 	return nil
+}
+
+// reconcileBootcNodePool resolves the target OS image for the pool and ensures a
+// corresponding paused BootcNodePool exists. The image is taken from the pool's
+// currently rendered MachineConfig OSImageURL, which already accounts for the
+// base image, OS image stream, and any user override.
+func (ctrl *Controller) reconcileBootcNodePool(cc *mcfgv1.ControllerConfig, pool *mcfgv1.MachineConfigPool) error {
+	targetImage := ""
+	if pool.Spec.Configuration.Name != "" {
+		renderedMC, err := ctrl.mcLister.Get(pool.Spec.Configuration.Name)
+		if err != nil {
+			return fmt.Errorf("getting rendered MachineConfig %q: %w", pool.Spec.Configuration.Name, err)
+		}
+		targetImage = renderedMC.Spec.OSImageURL
+	}
+	// Fall back to the controllerconfig base image if the rendered MC has no
+	// OSImageURL (e.g. very early in bootstrap).
+	if targetImage == "" && cc != nil {
+		targetImage = ctrlcommon.GetBaseImageContainer(&cc.Spec, nil)
+	}
+
+	return ctrl.bootcReconciler.ReconcilePool(context.TODO(), pool, targetImage)
+}
+
+// filterBootcStagedCandidates returns the subset of candidate nodes for which
+// the bootc-operator has already staged (or booted) the pool's target OS image,
+// along with a count of nodes that were held back because their image is not yet
+// staged.
+//
+// When bootc node management is enabled, the OS image is fetched and staged for
+// the next boot by the bootc-operator daemon while the node is still online (no
+// drain, no reboot). Only once the target image is staged do we let the MCD
+// begin the node's update: it drains, applies the non-OS config, and then
+// reboots into the already-staged deployment as part of its normal flow. Nodes
+// whose image is not yet staged are held back so we never start an update we
+// can't finalize with a single MCD-owned reboot.
+//
+// The held-back count is returned so the caller can requeue the pool: staging
+// completion is reported asynchronously on the BootcNode status by the
+// bootc-operator, which does not itself trigger a pool sync, so without an
+// explicit requeue a pool whose candidates are all waiting on staging would
+// stall until some unrelated event re-syncs it.
+func (ctrl *Controller) filterBootcStagedCandidates(pool *mcfgv1.MachineConfigPool, candidates []*corev1.Node) (staged []*corev1.Node, heldBack int) {
+	ctx := context.TODO()
+	for _, node := range candidates {
+		ok, err := ctrl.bootcReconciler.NodeStagedOrBooted(ctx, pool.Name, node.Name)
+		if err != nil {
+			// Treat transient lookup errors as "not ready yet": hold the node
+			// back and let the pool requeue rather than starting an update whose
+			// OS image may not be staged.
+			klog.Warningf("bootc: error checking staged state for node %s in pool %s (holding back): %v", node.Name, pool.Name, err)
+			heldBack++
+			continue
+		}
+		if !ok {
+			klog.V(4).Infof("bootc: node %s not yet staged with pool %s target image; deferring update", node.Name, pool.Name)
+			heldBack++
+			continue
+		}
+		staged = append(staged, node)
+	}
+	return staged, heldBack
 }
 
 // updateCandidateNode needs to understand MOSB

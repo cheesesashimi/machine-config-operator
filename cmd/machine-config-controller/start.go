@@ -50,6 +50,7 @@ var (
 		tlsCipherSuites          []string
 		tlsMinVersion            string
 		streamsCache             string
+		bootcNodeManagement      bool
 	}
 )
 
@@ -61,6 +62,7 @@ func init() {
 	startCmd.PersistentFlags().StringSliceVar(&startOpts.tlsCipherSuites, "tls-cipher-suites", nil, "Comma-separated list of cipher suites for the metrics server")
 	startCmd.PersistentFlags().StringVar(&startOpts.tlsMinVersion, "tls-min-version", "VersionTLS12", "Minimum TLS version supported for the metrics server")
 	startCmd.PersistentFlags().StringVar(&startOpts.streamsCache, "streams-cache", "/var/cache/mcc", "Directory to use as cache for streams discovery")
+	startCmd.PersistentFlags().BoolVar(&startOpts.bootcNodeManagement, "enable-bootc-node-management", ctrlcommon.BootcNodeManagementEnabledFromEnv(), "PoC: delegate OS image rollout to the bootc-operator via BootcNode/BootcNodePool objects")
 }
 
 func runStartCmd(_ *cobra.Command, _ []string) {
@@ -323,6 +325,28 @@ func createControllers(ctx *ctrlcommon.ControllerContext, inspectionCache *image
 		inspectionCache.RegisterEvicter(renderCtrl)
 	}
 
+	nodeCtrl := node.New(
+		ctx.InformerFactory.Machineconfiguration().V1().ControllerConfigs(),
+		ctx.InformerFactory.Machineconfiguration().V1().MachineConfigs(),
+		ctx.InformerFactory.Machineconfiguration().V1().MachineConfigPools(),
+		ctx.KubeInformerFactory.Core().V1().Nodes(),
+		ctx.MCOPodInformerFactory.Core().V1().Pods(),
+		ctx.OCLInformerFactory.Machineconfiguration().V1().MachineOSConfigs(),
+		ctx.OCLInformerFactory.Machineconfiguration().V1().MachineOSBuilds(),
+		ctx.InformerFactory.Machineconfiguration().V1().MachineConfigNodes(),
+		ctx.ConfigInformerFactory.Config().V1().Schedulers(),
+		ctx.OperatorInformerFactory.Operator().V1().MachineConfigurations(),
+		ctx.InformerFactory.Machineconfiguration().V1().OSImageStreams(),
+		ctx.ConfigInformerFactory.Config().V1().Infrastructures(),
+		ctx.ClientBuilder.KubeClientOrDie("node-update-controller"),
+		ctx.ClientBuilder.MachineConfigClientOrDie("node-update-controller"),
+		ctx.FeatureGatesHandler,
+	)
+	// PoC: when enabled, delegate OS image rollout to the bootc-operator.
+	if startOpts.bootcNodeManagement {
+		nodeCtrl.EnableBootcNodeManagement(ctx.ClientBuilder.BootcClientOrDie("node-update-controller-bootc"))
+	}
+
 	var controllers []ctrlcommon.Controller
 	controllers = append(controllers,
 		renderCtrl,
@@ -369,23 +393,7 @@ func createControllers(ctx *ctrlcommon.ControllerContext, inspectionCache *image
 			ctx.FeatureGatesHandler,
 		),
 		// The node controller consumes data written by the render controller
-		node.New(
-			ctx.InformerFactory.Machineconfiguration().V1().ControllerConfigs(),
-			ctx.InformerFactory.Machineconfiguration().V1().MachineConfigs(),
-			ctx.InformerFactory.Machineconfiguration().V1().MachineConfigPools(),
-			ctx.KubeInformerFactory.Core().V1().Nodes(),
-			ctx.MCOPodInformerFactory.Core().V1().Pods(),
-			ctx.OCLInformerFactory.Machineconfiguration().V1().MachineOSConfigs(),
-			ctx.OCLInformerFactory.Machineconfiguration().V1().MachineOSBuilds(),
-			ctx.InformerFactory.Machineconfiguration().V1().MachineConfigNodes(),
-			ctx.ConfigInformerFactory.Config().V1().Schedulers(),
-			ctx.OperatorInformerFactory.Operator().V1().MachineConfigurations(),
-			ctx.InformerFactory.Machineconfiguration().V1().OSImageStreams(),
-			ctx.ConfigInformerFactory.Config().V1().Infrastructures(),
-			ctx.ClientBuilder.KubeClientOrDie("node-update-controller"),
-			ctx.ClientBuilder.MachineConfigClientOrDie("node-update-controller"),
-			ctx.FeatureGatesHandler,
-		),
+		nodeCtrl,
 	)
 
 	return controllers
