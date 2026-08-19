@@ -18,9 +18,8 @@ type opts struct {
 	containerfilePath        string
 	containerfileContents    string
 	poolName                 string
-	injectYumRepos           bool
-	waitForBuildInfo         bool
-	enableFeatureGate        bool
+	injectYumRepos  bool
+	waitForBuildInfo bool
 }
 
 func (o *opts) deepCopy() opts {
@@ -34,9 +33,8 @@ func (o *opts) deepCopy() opts {
 		containerfilePath:        o.containerfilePath,
 		containerfileContents:    o.containerfileContents,
 		poolName:                 o.poolName,
-		injectYumRepos:           o.injectYumRepos,
-		waitForBuildInfo:         o.waitForBuildInfo,
-		enableFeatureGate:        o.enableFeatureGate,
+		injectYumRepos:  o.injectYumRepos,
+		waitForBuildInfo: o.waitForBuildInfo,
 	}
 }
 
