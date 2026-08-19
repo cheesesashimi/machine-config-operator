@@ -1679,6 +1679,29 @@ func (ctrl *Controller) setClusterConfigAnnotation(nodes []*corev1.Node, control
 // currently rendered MachineConfig OSImageURL, which already accounts for the
 // base image, OS image stream, and any user override.
 func (ctrl *Controller) reconcileBootcNodePool(cc *mcfgv1.ControllerConfig, pool *mcfgv1.MachineConfigPool) error {
+	// When on-cluster layering (OCL) is active for this pool, the BootcNodePool
+	// must track the layered OS image produced by the OCL build pipeline, not the
+	// base OS image stored in the rendered MachineConfig. The layered image is
+	// the final artifact that nodes will boot into, so it is the correct image
+	// for the bootc-operator to pre-stage. Using the base image here would cause
+	// the bootc-operator to stage the wrong image, defeating the pre-staging
+	// optimisation entirely.
+	//
+	// The built image's pull spec is authoritative on
+	// MachineOSConfig.Status.CurrentImagePullSpec once a successful build exists.
+	// We only use it when that field is non-empty; if the build has not yet
+	// completed we fall through to the base-image path so the BootcNodePool is
+	// still created and can be updated once the build finishes.
+	mosc, _, err := ctrl.getConfigAndBuild(pool)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("getting MachineOSConfig for pool %q: %w", pool.Name, err)
+	}
+	if mosc != nil && mosc.Status.CurrentImagePullSpec != "" {
+		klog.V(4).Infof("bootc: pool %s is OCL-layered; using built image %s for BootcNodePool", pool.Name, mosc.Status.CurrentImagePullSpec)
+		return ctrl.bootcReconciler.ReconcilePool(context.TODO(), pool, string(mosc.Status.CurrentImagePullSpec))
+	}
+
+	// Non-OCL path: use the OS image URL from the rendered MachineConfig.
 	targetImage := ""
 	if pool.Spec.Configuration.Name != "" {
 		renderedMC, err := ctrl.mcLister.Get(pool.Spec.Configuration.Name)

@@ -1012,6 +1012,22 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig, skipCertifi
 		return &unreconcilableErr{wrappedErr}
 	}
 
+	// When bootc-operator delegation is active, certain MachineConfig fields
+	// (extensions, kernelType) cannot be applied because the MCD no longer runs
+	// rpm-ostree for OS package layering. Reject the config early so the node is
+	// marked Unreconcilable and the MachineConfigPool surfaces it as Degraded.
+	// On-cluster layering (oclEnabled) is exempt because it has its own
+	// rpm-ostree-based build pipeline that handles these fields.
+	if dn.bootcNodeManagement {
+		if bootcErr := checkBootcIncompatibleFields(newConfig, diff); bootcErr != nil {
+			wrappedErr := fmt.Errorf("config %s is not applicable under bootc-operator delegation: %w", newConfigName, bootcErr)
+			if dn.nodeWriter != nil {
+				dn.nodeWriter.Eventf(corev1.EventTypeWarning, "BootcIncompatibleConfig", "%s", wrappedErr.Error())
+			}
+			return &unreconcilableErr{wrappedErr}
+		}
+	}
+
 	logSystem("Starting update from %s to %s: %+v", oldConfigName, newConfigName, diff)
 
 	diffFileSet := ctrlcommon.CalculateConfigFileDiffs(&oldIgnConfig, &newIgnConfig)
@@ -1593,6 +1609,43 @@ func newMachineConfigDiff(oldConfig, newConfig *mcfgv1.MachineConfig) (*machineC
 // underlying node filesystem and can inspect the FIPS file
 // (/proc/sys/crypto/fips_enabled) and can determine if there is a mismatch
 // between the MachineConfig and the actual on-disk state.
+// checkBootcIncompatibleFields returns an error if the new rendered config
+// specifies fields that cannot be applied when bootc-operator delegation is
+// active and on-cluster layering (OCL) is not in use.
+//
+// Both extensions and kernelType are applied via rpm-ostree package layering.
+// Under bootc delegation, the MCD never runs rpm-ostree to rebase or layer
+// packages, so these fields are silently ignored at best and broken at worst.
+// OCL (oclEnabled in the diff) has its own rpm-ostree-based build pipeline that
+// can handle them; when OCL is active the check is skipped.
+//
+// The returned error is wrapped as an unreconcilableErr by the caller so that
+// the node is marked Unreconcilable (not merely Degraded), and the
+// MachineConfigPool eventually surfaces this as NodeDegraded → Degraded.
+func checkBootcIncompatibleFields(newConfig *mcfgv1.MachineConfig, diff *machineConfigDiff) error {
+	// OCL has its own layered build path that supports extensions and kernelType.
+	if diff.oclEnabled {
+		return nil
+	}
+
+	ktype := helpers.CanonicalizeKernelType(newConfig.Spec.KernelType)
+	if ktype != ctrlcommon.KernelTypeDefault {
+		return fmt.Errorf(
+			"MachineConfig %q sets kernelType=%q, which cannot be applied when "+
+				"bootc-operator delegation is active and on-cluster layering is not enabled",
+			newConfig.Name, newConfig.Spec.KernelType)
+	}
+
+	if len(newConfig.Spec.Extensions) > 0 {
+		return fmt.Errorf(
+			"MachineConfig %q sets extensions=%v, which cannot be applied when "+
+				"bootc-operator delegation is active and on-cluster layering is not enabled",
+			newConfig.Name, newConfig.Spec.Extensions)
+	}
+
+	return nil
+}
+
 func reconcilable(oldConfig, newConfig *mcfgv1.MachineConfig, overrides *opv1.IrreconcilableValidationOverrides) (*machineConfigDiff, error) {
 	if err := ctrlcommon.IsRenderedConfigReconcilable(oldConfig, newConfig, overrides); err != nil {
 		return nil, fmt.Errorf("configs %s, %s are not reconcilable: %w", oldConfig.Name, newConfig.Name, err)

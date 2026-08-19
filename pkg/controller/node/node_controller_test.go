@@ -29,6 +29,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	configv1 "github.com/openshift/api/config/v1"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
+	bootcfake "github.com/bootc-dev/bootc-operator/pkg/generated/clientset/versioned/fake"
 	fakeconfigv1client "github.com/openshift/client-go/config/clientset/versioned/fake"
 	configv1informer "github.com/openshift/client-go/config/informers/externalversions"
 	"github.com/openshift/client-go/machineconfiguration/clientset/versioned/fake"
@@ -37,6 +38,7 @@ import (
 	operatorinformer "github.com/openshift/client-go/operator/informers/externalversions"
 	"github.com/openshift/machine-config-operator/pkg/constants"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
+	"github.com/openshift/machine-config-operator/pkg/controller/node/bootc"
 	daemonconsts "github.com/openshift/machine-config-operator/pkg/daemon/constants"
 	"github.com/openshift/machine-config-operator/pkg/version"
 	"github.com/openshift/machine-config-operator/test/helpers"
@@ -2597,6 +2599,116 @@ func TestArbiterPoolSyncWhenMasterPaused(t *testing.T) {
 
 	assert.True(t, arbiterPatched, "Expected arbiter node to be patched when master pool is paused")
 	assert.False(t, masterPatched, "Expected master node not to be patched during arbiter sync")
+}
+
+// TestReconcileBootcNodePoolImageSelection verifies that reconcileBootcNodePool
+// sets the correct target image on the BootcNodePool depending on whether
+// on-cluster layering (OCL) is active for the pool.
+//
+// Non-OCL pool: the image comes from the rendered MachineConfig's OSImageURL.
+// OCL pool (build ready): the image comes from MachineOSConfig.Status.CurrentImagePullSpec.
+// OCL pool (build pending): CurrentImagePullSpec is empty, so the function falls
+// back to the rendered MachineConfig's OSImageURL (the BootcNodePool should still
+// be created / kept in sync with the base image while the build is in progress).
+func TestReconcileBootcNodePoolImageSelection(t *testing.T) {
+	t.Parallel()
+
+	const (
+		poolName       = "worker"
+		renderedMCName = "rendered-worker-abc"
+		baseImage      = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:base"
+		oclImage       = "registry.example.com/ocl/worker@sha256:layered"
+	)
+
+	renderedMC := &mcfgv1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: renderedMCName},
+		Spec:       mcfgv1.MachineConfigSpec{OSImageURL: baseImage},
+	}
+
+	pool := helpers.NewMachineConfigPool(poolName, nil, helpers.WorkerSelector, renderedMCName)
+
+	cc := newControllerConfig(ctrlcommon.ControllerConfigName, configv1.SingleReplicaTopologyMode)
+
+	// Helper that constructs a MachineOSConfig for the worker pool with an optional
+	// CurrentImagePullSpec (empty string means the build has not completed yet).
+	oclMOSC := func(pullSpec string) *mcfgv1.MachineOSConfig {
+		b := helpers.NewMachineOSConfigBuilder("mosc-worker").WithMachineConfigPool(poolName)
+		if pullSpec != "" {
+			b = b.WithCurrentImagePullspec(pullSpec)
+		}
+		return b.MachineOSConfig()
+	}
+
+	tests := []struct {
+		name          string
+		mosc          *mcfgv1.MachineOSConfig // nil → no OCL
+		wantImage     string
+	}{
+		{
+			name:      "non-OCL pool: uses rendered MachineConfig OSImageURL",
+			mosc:      nil,
+			wantImage: baseImage,
+		},
+		{
+			name:      "OCL pool with completed build: uses MachineOSConfig CurrentImagePullSpec",
+			mosc:      oclMOSC(oclImage),
+			wantImage: oclImage,
+		},
+		{
+			name:      "OCL pool with pending build: falls back to rendered MachineConfig OSImageURL",
+			mosc:      oclMOSC(""),
+			wantImage: baseImage,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Build a minimal fake MCO client and informer factory seeded with our
+			// objects so that the listers used inside reconcileBootcNodePool work.
+			objects := []runtime.Object{pool, cc, renderedMC}
+			if tc.mosc != nil {
+				objects = append(objects, tc.mosc)
+			}
+			mcfgClient := fake.NewSimpleClientset(objects...)
+			stopCh := make(chan struct{})
+			defer close(stopCh)
+			i := informers.NewSharedInformerFactory(mcfgClient, 0)
+
+			// Seed the informer caches directly (no goroutines needed for lister use).
+			require.NoError(t, i.Machineconfiguration().V1().MachineConfigs().Informer().GetIndexer().Add(renderedMC))
+			require.NoError(t, i.Machineconfiguration().V1().ControllerConfigs().Informer().GetIndexer().Add(cc))
+			require.NoError(t, i.Machineconfiguration().V1().MachineConfigPools().Informer().GetIndexer().Add(pool))
+			if tc.mosc != nil {
+				require.NoError(t, i.Machineconfiguration().V1().MachineOSConfigs().Informer().GetIndexer().Add(tc.mosc))
+			}
+
+			// Build a bootc fake client so we can inspect which image ReconcilePool received.
+			bootcClient := bootcfake.NewSimpleClientset()
+			reconciler := bootc.NewReconciler(bootcClient)
+
+			ctrl := &Controller{
+				mcLister:   i.Machineconfiguration().V1().MachineConfigs().Lister(),
+				ccLister:   i.Machineconfiguration().V1().ControllerConfigs().Lister(),
+				mcpLister:  i.Machineconfiguration().V1().MachineConfigPools().Lister(),
+				moscLister: i.Machineconfiguration().V1().MachineOSConfigs().Lister(),
+				mosbLister: i.Machineconfiguration().V1().MachineOSBuilds().Lister(),
+				bootcReconciler: reconciler,
+			}
+
+			err := ctrl.reconcileBootcNodePool(cc, pool)
+			require.NoError(t, err)
+
+			np, err := bootcClient.NodeV1alpha1().Bootcnodepools().Get(context.Background(), poolName, metav1.GetOptions{})
+			require.NoError(t, err, "BootcNodePool should have been created")
+			assert.Equal(t, tc.wantImage, np.Spec.Image.Ref,
+				"BootcNodePool image ref should match expected target image")
+			assert.True(t, np.Spec.Rollout != nil && np.Spec.Rollout.Paused,
+				"BootcNodePool must always be kept paused")
+		})
+	}
 }
 
 // TestArbiterPoolBlockedWhenMasterPausedWithUnavailableNode verifies that when the master

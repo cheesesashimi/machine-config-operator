@@ -975,6 +975,85 @@ func TestPodmanCopy_CreateContainerCall(t *testing.T) {
 	assert.Error(t, err, "Expected error from podmanRemove since we're not mocking that part")
 }
 
+// TestCheckBootcIncompatibleFields validates that checkBootcIncompatibleFields
+// correctly identifies MachineConfig fields that cannot be applied when bootc
+// delegation is active and OCL is not in use.
+func TestCheckBootcIncompatibleFields(t *testing.T) {
+	ignCfg := ctrlcommon.NewIgnConfig()
+	baseConfig := helpers.CreateMachineConfigFromIgnition(ignCfg)
+	baseConfig.ObjectMeta = metav1.ObjectMeta{Name: "rendered-worker-abc123"}
+
+	for _, tc := range []struct {
+		name       string
+		kernelType string
+		extensions []string
+		oclEnabled bool
+		wantErr    bool
+	}{
+		{
+			name:    "no extensions, default kernel: allowed",
+			wantErr: false,
+		},
+		{
+			name:       "realtime kernel, no OCL: rejected",
+			kernelType: ctrlcommon.KernelTypeRealtime,
+			wantErr:    true,
+		},
+		{
+			name:       "64k-pages kernel, no OCL: rejected",
+			kernelType: ctrlcommon.KernelType64kPages,
+			wantErr:    true,
+		},
+		{
+			name:       "extensions set, no OCL: rejected",
+			extensions: []string{"usbguard"},
+			wantErr:    true,
+		},
+		{
+			name:       "both extensions and non-default kernel, no OCL: rejected",
+			kernelType: ctrlcommon.KernelTypeRealtime,
+			extensions: []string{"ipsec"},
+			wantErr:    true,
+		},
+		{
+			name:       "realtime kernel with OCL active: allowed",
+			kernelType: ctrlcommon.KernelTypeRealtime,
+			oclEnabled: true,
+			wantErr:    false,
+		},
+		{
+			name:       "extensions with OCL active: allowed",
+			extensions: []string{"usbguard", "ipsec"},
+			oclEnabled: true,
+			wantErr:    false,
+		},
+		{
+			name:       "empty string kernelType treated as default: allowed",
+			kernelType: "",
+			wantErr:    false,
+		},
+		{
+			name:       "explicit 'default' kernelType: allowed",
+			kernelType: ctrlcommon.KernelTypeDefault,
+			wantErr:    false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig.DeepCopy()
+			cfg.Spec.KernelType = tc.kernelType
+			cfg.Spec.Extensions = tc.extensions
+
+			diff := &machineConfigDiff{oclEnabled: tc.oclEnabled}
+			err := checkBootcIncompatibleFields(cfg, diff)
+			if tc.wantErr {
+				assert.Error(t, err, "expected an error but got none")
+			} else {
+				assert.NoError(t, err, "expected no error but got: %v", err)
+			}
+		})
+	}
+}
+
 func TestLegacyExtensionPackageUpgradeScenario(t *testing.T) {
 	// This test validates the upgrade scenario from 4.x to 5.0 where the new MCD
 	// code runs before the OS image update. It mocks the RPM query to simulate
