@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -55,6 +56,8 @@ const (
 	// https://github.com/openshift/machine-config-operator/issues/301
 	renderDelay = 5 * time.Second
 )
+
+var builtInMachineConfigRoles = []string{"master", "worker", "arbiter"}
 
 var (
 	// controllerKind contains the schema.GroupVersionKind for this controller type.
@@ -554,6 +557,9 @@ func (ctrl *Controller) syncMachineConfigPool(ctx context.Context, key string) e
 	if err != nil {
 		return err
 	}
+	if err := validateRequiredMachineConfigsExist(pool, mcs); err != nil {
+		return err
+	}
 	sort.SliceStable(mcs, func(i, j int) bool { return mcs[i].Name < mcs[j].Name })
 
 	if len(mcs) == 0 {
@@ -565,6 +571,92 @@ func (ctrl *Controller) syncMachineConfigPool(ctx context.Context, key string) e
 		return ctrl.syncFailingStatus(pool, err)
 	}
 	return ctrl.syncAvailableStatus(pool)
+}
+
+// validateRequiredMachineConfigs prevents a rendered config from being
+// generated from user-provided MachineConfigs while the template controller's
+// base configs are still being created. The base configs contain the kubelet
+// and container-runtime systemd configuration; assigning a render without
+// them can cause the daemon to remove those files on the next update.
+func validateRequiredMachineConfigsExist(pool *mcfgv1.MachineConfigPool, configs []*mcfgv1.MachineConfig) error {
+	if pool.Spec.MachineConfigSelector == nil {
+		return nil
+	}
+
+	// A direct role label takes precedence over role match expressions.
+	if role, ok := pool.Spec.MachineConfigSelector.MatchLabels[mcfgv1.MachineConfigRoleLabelKey]; ok {
+		return validateRequiredMachineConfigsForRole(role, configs)
+	}
+
+	roles := getMachineConfigRolesFromMatchExpressions(pool.Spec.MachineConfigSelector.MatchExpressions)
+
+	roleCount := roles.Len()
+	if roleCount == 1 {
+		return validateRequiredMachineConfigsForRole(roles.UnsortedList()[0], configs)
+	}
+
+	if roleCount == 0 {
+		// A custom pool with a selector unrelated to a built-in role has no
+		// fixed template set that this controller can validate here.
+		return nil
+	}
+
+	return fmt.Errorf("MachineConfigPool %s selector matches multiple built-in roles: %s", pool.Name, strings.Join(sets.List(roles), ", "))
+}
+
+// validateRequiredMachineConfigsForRole verifies that all required base
+// MachineConfigs for a built-in role are available.
+func validateRequiredMachineConfigsForRole(role string, configs []*mcfgv1.MachineConfig) error {
+	// These config names mirror templates/<role>/00-<role>,
+	// templates/<role>/01-<role>-container-runtime, and
+	// templates/<role>/01-<role>-kubelet.
+	// In the future, the templates should be embedded and this list constructed
+	// dynamically from their contents.
+	needed := sets.New(
+		fmt.Sprintf("00-%s", role),
+		fmt.Sprintf("01-%s-container-runtime", role),
+		fmt.Sprintf("01-%s-kubelet", role),
+	)
+
+	for _, config := range configs {
+		needed.Delete(config.Name)
+		if needed.Len() == 0 {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("required %s MachineConfigs are not available yet: %s", role, strings.Join(sets.List(needed), ", "))
+}
+
+// getMachineConfigRolesFromMatchExpressions returns the built-in MachineConfig
+// roles selected by role-specific label expressions.
+func getMachineConfigRolesFromMatchExpressions(expressions []metav1.LabelSelectorRequirement) sets.Set[string] {
+	roles := sets.New([]string{}...)
+	for _, expression := range expressions {
+		// Only role expressions determine which built-in templates are required.
+		if expression.Key != mcfgv1.MachineConfigRoleLabelKey {
+			continue
+		}
+		switch expression.Operator {
+		// All explicitly included roles may match.
+		case metav1.LabelSelectorOpIn:
+			roles.Insert(expression.Values...)
+		// An existence check permits any built-in role.
+		case metav1.LabelSelectorOpExists:
+			roles.Insert(builtInMachineConfigRoles...)
+		// Include built-in roles that are not excluded.
+		case metav1.LabelSelectorOpNotIn:
+			for _, candidate := range builtInMachineConfigRoles {
+				if !slices.Contains(expression.Values, candidate) {
+					roles.Insert(candidate)
+				}
+			}
+		}
+	}
+
+	// Ignore custom or unknown role values; only built-in pools have fixed
+	// template MachineConfigs that this controller can validate here.
+	return roles.Intersection(sets.New(builtInMachineConfigRoles...))
 }
 
 func (ctrl *Controller) syncAvailableStatus(pool *mcfgv1.MachineConfigPool) error {

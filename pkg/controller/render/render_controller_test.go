@@ -99,15 +99,9 @@ func (f *fixture) newController() *Controller {
 	c.eventRecorder = ctrlcommon.NamespacedEventRecorder(&record.FakeRecorder{})
 
 	stopCh := make(chan struct{})
+	defer close(stopCh)
 	i.Start(stopCh)
 	i.WaitForCacheSync(stopCh)
-	// WaitForCacheSync only waits for the informer stores to sync; the initial
-	// add notifications are delivered to the event handlers asynchronously.
-	// Stop the informers and wait for their handler goroutines to exit so that
-	// late events cannot race with tests that replace callbacks such as
-	// enqueueMachineConfigPool.
-	close(stopCh)
-	i.Shutdown()
 
 	for _, c := range f.ccLister {
 		i.Machineconfiguration().V1().ControllerConfigs().Informer().GetIndexer().Add(c)
@@ -289,6 +283,9 @@ func TestCreatesGeneratedMachineConfig(t *testing.T) {
 		},
 	}}
 	mcs := []*mcfgv1.MachineConfig{
+		helpers.NewMachineConfig("00-master", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-container-runtime", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-kubelet", map[string]string{"node-role/master": ""}, "dummy://base", nil),
 		helpers.NewMachineConfig("00-test-cluster-master", map[string]string{"node-role/master": ""}, "dummy://", []ign3types.File{files[0]}),
 		helpers.NewMachineConfig("05-extra-master", map[string]string{"node-role/master": ""}, "dummy://1", []ign3types.File{files[1]}),
 	}
@@ -319,6 +316,80 @@ func TestCreatesGeneratedMachineConfig(t *testing.T) {
 	f.run(getKey(mcp, t))
 }
 
+func TestValidateRequiredMachineConfigsExist(t *testing.T) {
+	tests := []struct {
+		name          string
+		configNames   func(string) []string
+		expectedError []string
+	}{
+		{
+			name: "incomplete base configs are rejected",
+			configNames: func(role string) []string {
+				return []string{
+					fmt.Sprintf("50-%s-dnsmasq", role),
+					fmt.Sprintf("99-%s-ssh", role),
+				}
+			},
+			expectedError: []string{"00-%s", "01-%s-container-runtime", "01-%s-kubelet"},
+		},
+		{
+			name: "incomplete base configs are rejected with one required config",
+			configNames: func(role string) []string {
+				return []string{
+					fmt.Sprintf("50-%s-dnsmasq", role),
+					fmt.Sprintf("99-%s-ssh", role),
+					fmt.Sprintf("00-%s", role),
+				}
+			},
+			expectedError: []string{"01-%s-container-runtime", "01-%s-kubelet"},
+		},
+		{
+			name: "only one required config is rejected",
+			configNames: func(role string) []string {
+				return []string{fmt.Sprintf("00-%s", role)}
+			},
+			expectedError: []string{"01-%s-container-runtime", "01-%s-kubelet"},
+		},
+		{
+			name: "complete base configs are accepted",
+			configNames: func(role string) []string {
+				return []string{
+					fmt.Sprintf("00-%s", role),
+					fmt.Sprintf("01-%s-container-runtime", role),
+					fmt.Sprintf("01-%s-kubelet", role),
+					fmt.Sprintf("99-%s-ssh", role),
+				}
+			},
+		},
+	}
+
+	for _, role := range builtInMachineConfigRoles {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/%s", role, tt.name), func(t *testing.T) {
+				pool := helpers.NewMachineConfigPool(role, &metav1.LabelSelector{
+					MatchLabels: map[string]string{mcfgv1.MachineConfigRoleLabelKey: role},
+				}, nil, "")
+
+				configs := make([]*mcfgv1.MachineConfig, 0, len(tt.configNames(role)))
+				for _, name := range tt.configNames(role) {
+					configs = append(configs, helpers.NewMachineConfig(name, nil, "", nil))
+				}
+
+				err := validateRequiredMachineConfigsExist(pool, configs)
+				if len(tt.expectedError) == 0 {
+					require.NoError(t, err)
+					return
+				}
+
+				require.Error(t, err)
+				for _, expected := range tt.expectedError {
+					assert.Contains(t, err.Error(), fmt.Sprintf(expected, role))
+				}
+			})
+		}
+	}
+}
+
 // Testing that ignition validation in generateRenderedMachineConfig() correctly finds MCs that contain invalid ignconfigs.
 // generateRenderedMachineConfig should return an error when one of the MCs in configs contains an invalid ignconfig.
 func TestIgnValidationGenerateRenderedMachineConfig(t *testing.T) {
@@ -333,6 +404,9 @@ func TestIgnValidationGenerateRenderedMachineConfig(t *testing.T) {
 		},
 	}}
 	mcs := []*mcfgv1.MachineConfig{
+		helpers.NewMachineConfig("00-master", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-container-runtime", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-kubelet", map[string]string{"node-role/master": ""}, "dummy://base", nil),
 		helpers.NewMachineConfig("00-test-cluster-master", map[string]string{"node-role/master": ""}, "dummy://", []ign3types.File{files[0]}),
 		helpers.NewMachineConfig("05-extra-master", map[string]string{"node-role/master": ""}, "dummy://1", []ign3types.File{files[1]}),
 	}
@@ -378,6 +452,9 @@ func TestUpdatesGeneratedMachineConfig(t *testing.T) {
 		},
 	}}
 	mcs := []*mcfgv1.MachineConfig{
+		helpers.NewMachineConfig("00-master", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-container-runtime", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-kubelet", map[string]string{"node-role/master": ""}, "dummy://base", nil),
 		helpers.NewMachineConfig("00-test-cluster-master", map[string]string{"node-role/master": ""}, "dummy://", []ign3types.File{files[0]}),
 		helpers.NewMachineConfig("05-extra-master", map[string]string{"node-role/master": ""}, "dummy://1", []ign3types.File{files[1]}),
 	}
@@ -511,6 +588,9 @@ func TestDoNothing(t *testing.T) {
 		},
 	}}
 	mcs := []*mcfgv1.MachineConfig{
+		helpers.NewMachineConfig("00-master", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-container-runtime", map[string]string{"node-role/master": ""}, "dummy://base", nil),
+		helpers.NewMachineConfig("01-master-kubelet", map[string]string{"node-role/master": ""}, "dummy://base", nil),
 		helpers.NewMachineConfig("00-test-cluster-master", map[string]string{"node-role/master": ""}, "dummy://", []ign3types.File{files[0]}),
 		helpers.NewMachineConfig("05-extra-master", map[string]string{"node-role/master": ""}, "dummy://1", []ign3types.File{files[1]}),
 	}
